@@ -29,7 +29,7 @@
 <div id="msg" role="status" aria-live="polite"></div>
 <canvas id="canvas"></canvas>
 <script>
-// Robust Particle Text + ParticleCam
+// Particle Text + ParticleCam (updated: live color updates + doubling particles while cam on + reset on off)
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const msgEl = document.getElementById('msg');
@@ -38,8 +38,10 @@ let mouse = {x: null, y: null};
 let rasterPoints = null;
 let particleSize = 0.6;
 let charsPerLine = 16;
-let desiredParticles = 8000;
+const baseParticleCount = 8000;
+let desiredParticles = baseParticleCount;
 let densityMultiplier = 1;
+let camActive = false;
 
 function showMessage(text, ms = 3000){
   msgEl.textContent = text;
@@ -48,8 +50,9 @@ function showMessage(text, ms = 3000){
   showMessage._t = setTimeout(()=>{ msgEl.style.display = 'none'; }, ms);
 }
 
+function randInt(a,b){ return Math.floor(Math.random()*(b-a+1))+a; }
 function randomColor(){
-  return `rgba(${Math.floor(Math.random()*255)},${Math.floor(Math.random()*255)},${Math.floor(Math.random()*255)},0.6)`;
+  return `rgba(${randInt(0,255)},${randInt(0,255)},${randInt(0,255)},0.6)`;
 }
 
 class Particle{
@@ -91,7 +94,7 @@ class Particle{
         const f = (1 - (d / R)) * 4.0;
         this.vx += (dxm/d) * f;
         this.vy += (dym/d) * f;
-        this.color = `rgba(${Math.floor(Math.random()*255)},${Math.floor(Math.random()*255)},${Math.floor(Math.random()*255)},0.95)`;
+        this.color = `rgba(${randInt(0,255)},${randInt(0,255)},${randInt(0,255)},0.95)`;
         this.isDisrupted = true;
         this.cooldown = (Math.floor(Math.random()*11)+5) * 60;
       }
@@ -133,6 +136,27 @@ function initParticles(count = desiredParticles){
   }
 }
 
+function addExtraParticlesDouble(){
+  // Duplicate current particles with slight jitter to double the count
+  const original = particles.slice();
+  const extras = [];
+  for(let i=0;i<original.length;i++){
+    const p = original[i];
+    const nx = p.x + (Math.random()-0.5)*4;
+    const ny = p.y + (Math.random()-0.5)*4;
+    const np = new Particle(nx, ny);
+    // make extras inherit base color so they respond to camera too
+    np.baseColor = p.baseColor;
+    extras.push(np);
+  }
+  particles = particles.concat(extras);
+}
+
+function removeExtraParticles(){
+  // Reset to baseParticleCount grid
+  initParticles(baseParticleCount);
+}
+
 function resize(){
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
@@ -151,21 +175,21 @@ const camToggle = document.getElementById('camToggle');
 // Camera vars
 let camStream = null;
 let camVideo = null;
-let camInterval = null;
+let camOffscreen = null;
+let camCtx = null;
 
 // --- initial setup ---
 initParticles();
 resize();
 
 textInput.addEventListener('input', e => {
-  stopCameraIfRunning();
+  if(camActive){ camToggle.checked = false; stopCameraIfRunning(); removeExtraParticles(); camActive = false; }
   rasterizeText(e.target.value || '');
   assignRasterTargets(false);
 });
 
 densitySelect.addEventListener('change', e => {
   densityMultiplier = parseFloat(e.target.value) || 1;
-  // re-rasterize current content and reassign targets
   rasterizeText(textInput.value || '');
   assignRasterTargets(false);
 });
@@ -173,22 +197,24 @@ densitySelect.addEventListener('change', e => {
 camToggle.addEventListener('change', async e => {
   if(e.target.checked){
     const ok = await startCameraSafely();
-    if(!ok){
-      e.target.checked = false;
-      return;
-    }
-    // take an immediate snapshot if possible
-    rasterizeVideoFrame();
-    assignRasterTargets(false);
-    // then update every 10s
-    camInterval = setInterval(()=>{
-      rasterizeVideoFrame();
-      assignRasterTargets(false);
-    }, 10000);
+    if(!ok){ e.target.checked = false; return; }
+    // double particle count by adding extras (keep originals so positions remain familiar)
+    addExtraParticlesDouble();
+    camActive = true;
+    // prepare offscreen canvas once
+    camOffscreen = document.createElement('canvas');
+    camOffscreen.width = canvas.width; camOffscreen.height = canvas.height;
+    camCtx = camOffscreen.getContext('2d');
+    // start live color updates via requestAnimationFrame inside animate loop
+    showMessage('ParticleCam live — colors updating', 1500);
   } else {
+    // turn off camera: stop stream, remove extras and reset canvas
     stopCameraIfRunning();
+    camActive = false;
+    removeExtraParticles();
     rasterizeText(textInput.value || '');
-    assignRasterTargets(false);
+    assignRasterTargets(true);
+    showMessage('ParticleCam off — canvas reset', 1200);
   }
 });
 
@@ -205,7 +231,7 @@ async function startCameraSafely(){
   }
 
   try{
-    camStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
   }catch(err){
     console.error('Camera error', err);
     showMessage('Camera not available or permission denied.');
@@ -219,19 +245,10 @@ async function startCameraSafely(){
     camVideo.muted = true;
     camVideo.playsInline = true;
     camVideo.srcObject = camStream;
-    // wait for some data before trying to draw
-    await new Promise((res, rej)=>{
-      const onLoaded = ()=>{ cleanup(); res(); };
-      const onErr = (e)=>{ cleanup(); rej(e); };
-      function cleanup(){ camVideo.removeEventListener('loadeddata', onLoaded); camVideo.removeEventListener('error', onErr); }
-      camVideo.addEventListener('loadeddata', onLoaded);
-      camVideo.addEventListener('error', onErr);
-      // some browsers require play() to kick in the stream
-      const p = camVideo.play();
-      if(p && p.catch){ p.catch(()=>{}); }
-      // fallback: if loadeddata doesn't fire within 2.5s, resolve anyway
-      setTimeout(()=>{ cleanup(); res(); }, 2500);
-    });
+    const p = camVideo.play();
+    if(p && p.catch){ p.catch(()=>{}); }
+    // allow a short time for the video to become ready; we don't block too long
+    await new Promise(resolve => setTimeout(resolve, 400));
   }catch(err){
     console.error('Video setup error', err);
     showMessage('Could not start video stream.');
@@ -239,17 +256,14 @@ async function startCameraSafely(){
     return false;
   }
 
-  showMessage('ParticleCam active', 1500);
   return true;
 }
 
 function stopCameraIfRunning(){
-  if(camInterval){ clearInterval(camInterval); camInterval = null; }
   if(camStream){
     try{ camStream.getTracks().forEach(t=>t.stop()); }catch(_){ }
   }
-  camStream = null;
-  camVideo = null;
+  camStream = null; camVideo = null; camOffscreen = null; camCtx = null;
 }
 
 function rasterizeText(text){
@@ -275,25 +289,6 @@ function rasterizeText(text){
   return rasterPoints;
 }
 
-function rasterizeVideoFrame(){
-  if(!camVideo){ return null; }
-  // only draw if video has data
-  if(typeof camVideo.readyState !== 'undefined' && camVideo.readyState < 2){ return null; }
-  const offCanvas = document.createElement('canvas');
-  offCanvas.width = canvas.width; offCanvas.height = canvas.height;
-  const offCtx = offCanvas.getContext('2d');
-  try{
-    offCtx.drawImage(camVideo, 0, 0, offCanvas.width, offCanvas.height);
-  }catch(err){
-    // drawImage may throw in restrictive contexts — handle gracefully
-    console.error('drawImage error', err);
-    showMessage('Unable to capture camera frame.');
-    return null;
-  }
-  rasterPoints = extractPoints(offCtx, offCanvas);
-  return rasterPoints;
-}
-
 function extractPoints(offCtx, offCanvas){
   const imgData = offCtx.getImageData(0,0,offCanvas.width,offCanvas.height).data;
   const points = [];
@@ -311,25 +306,48 @@ function extractPoints(offCtx, offCanvas){
 
 function assignRasterTargets(initial){
   if(!rasterPoints) return;
-  // If rasterPoints require more particles than we have, re-init to match (but cap to avoid OOM)
-  if(rasterPoints.length > particles.length){
-    const cap = Math.max(rasterPoints.length, desiredParticles);
-    initParticles(cap);
-  }
+  // Ensure we have at least as many particles as rasterPoints
+  if(rasterPoints.length > particles.length){ initParticles(rasterPoints.length); }
   for(let i=0;i<particles.length;i++){
     if(i < rasterPoints.length){
       particles[i].target = rasterPoints[i];
       if(rasterPoints[i].color) particles[i].color = rasterPoints[i].color;
       particles[i].reassignDelay = initial ? 0 : Math.floor(Math.random()*150);
-    } else {
-      particles[i].target = null;
+    } else { particles[i].target = null; }
+  }
+}
+
+function updateParticlesFromCamera(){
+  if(!camActive || !camVideo || !camCtx) return;
+  try{
+    camCtx.drawImage(camVideo, 0, 0, camOffscreen.width, camOffscreen.height);
+    const image = camCtx.getImageData(0,0,camOffscreen.width,camOffscreen.height).data;
+    // update particle colors based on their screen position
+    for(let i=0;i<particles.length;i++){
+      const p = particles[i];
+      const x = Math.max(0, Math.min(Math.floor(p.x), camOffscreen.width-1));
+      const y = Math.max(0, Math.min(Math.floor(p.y), camOffscreen.height-1));
+      const idx = (y * camOffscreen.width + x) * 4;
+      const r = image[idx], g = image[idx+1], b = image[idx+2];
+      p.color = `rgba(${r},${g},${b},0.95)`;
     }
+  }catch(err){
+    // if something goes wrong (security or readiness), stop cam gracefully
+    console.error('camera update error', err);
+    showMessage('Camera frame update failed — stopping ParticleCam.');
+    camToggle.checked = false;
+    stopCameraIfRunning();
+    camActive = false;
+    removeExtraParticles();
+    rasterizeText(textInput.value || '');
+    assignRasterTargets(true);
   }
 }
 
 function animate(){
   ctx.fillStyle = 'rgba(11,12,16,0.35)';
   ctx.fillRect(0,0,canvas.width,canvas.height);
+  if(camActive){ updateParticlesFromCamera(); }
   for(const p of particles) p.update();
   requestAnimationFrame(animate);
 }
