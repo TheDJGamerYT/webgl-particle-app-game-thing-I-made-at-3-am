@@ -7,24 +7,49 @@
   <style>
     html,body{height:100%;margin:0;background:#0b0c10;overflow:hidden;color:#fff;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto}
     canvas{display:block;position:fixed;top:0;left:0;width:100%;height:100%;z-index:0}
-    #controls{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);z-index:2;display:flex;gap:10px;align-items:center}
-    #textInput{padding:8px 12px;border-radius:6px;border:none;font-size:16px;width:300px;}
-    #densitySelect{padding:6px 10px;border-radius:6px;border:none;font-size:14px;}
+    #controls{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);z-index:3;display:flex;gap:10px;align-items:center}
+    #textInput, #imageUpload, #formImageBtn{padding:8px 12px;border-radius:6px;border:none;font-size:16px;width:300px;background:#111;color:#fff}
+    #densitySelect, #particleAmountSelect, #toggleMode{padding:6px 10px;border-radius:6px;border:none;font-size:14px;background:#111;color:#fff}
+    #imageUpload, #formImageBtn{display:none;}
+    #msg{position:fixed;top:18px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.65);padding:8px 12px;border-radius:8px;z-index:4;font-size:13px;display:none}
   </style>
 </head>
 <body>
+<div id="msg" aria-live="polite"></div>
 <div id="controls">
   <input id="textInput" type="text" value="HELLO 🌎✨" autocomplete="off" />
+  <input id="imageUpload" type="file" accept="image/*" />
+  <button id="formImageBtn" disabled>Form Image</button>
   <select id="densitySelect">
     <option value="1">Low</option>
     <option value="1.5">Medium</option>
-    <option value="2">High</option>
+    <option value="2">Med-High</option>
+    <option value="2.5">High</option>
+    <option value="3">Ultra</option>
+  </select>
+  <select id="particleAmountSelect">
+    <option value="8000">Default (8000)</option>
+    <option value="12000">Medium Amount (12000)</option>
+    <option value="15000">High Amount (15000, may cause lag)</option>
+  </select>
+  <select id="toggleMode">
+    <option value="text">Text Mode</option>
+    <option value="image">Image Mode</option>
   </select>
 </div>
 <canvas id="canvas"></canvas>
 <script>
+// Restored missing rasterize functions and event handlers; fixed FPS reset to continue animation
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+const msgEl = document.getElementById('msg');
+const textInput = document.getElementById('textInput');
+const imageUpload = document.getElementById('imageUpload');
+const formImageBtn = document.getElementById('formImageBtn');
+const densitySelect = document.getElementById('densitySelect');
+const particleAmountSelect = document.getElementById('particleAmountSelect');
+const toggleMode = document.getElementById('toggleMode');
+
 let particles = [];
 let mouse = {x: null, y: null};
 let rasterPoints = null;
@@ -33,11 +58,22 @@ let charsPerLine = 16;
 const baseParticleCount = 8000;
 let desiredParticles = baseParticleCount;
 let densityMultiplier = 1;
+let uploadedImage = null;
+let mode = 'text';
+
+// FPS monitoring
+let fpsHistory = [];
+let lastFrameTime = performance.now();
+
+function showMessage(text, ms = 2500){
+  msgEl.textContent = text;
+  msgEl.style.display = 'block';
+  clearTimeout(showMessage._t);
+  showMessage._t = setTimeout(()=>{ msgEl.style.display = 'none'; }, ms);
+}
 
 function randInt(a,b){ return Math.floor(Math.random()*(b-a+1))+a; }
-function randomColor(){
-  return `rgba(${randInt(0,255)},${randInt(0,255)},${randInt(0,255)},0.6)`;
-}
+function randomColor(){ return `rgba(${randInt(90,220)},${randInt(90,220)},${randInt(90,220)},0.85)`; }
 
 class Particle{
   constructor(x,y){
@@ -48,9 +84,9 @@ class Particle{
     this.color = this.baseColor;
     this.target = null;
     this.isDisrupted = false;
-    this.moveDuration = 5;
+    this.moveDuration = randInt(1,5);
     this.cooldown = 0;
-    this.reassignDelay = 0;
+    this.reassignDelay = randInt(60, 300);
   }
   update(){
     let tx = this.ox, ty = this.oy;
@@ -67,7 +103,6 @@ class Particle{
       if(this.reassignDelay > 0) this.reassignDelay--;
     }
 
-    // mouse disruption
     if(mouse.x !== null){
       const dxm = this.x - mouse.x;
       const dym = this.y - mouse.y;
@@ -80,19 +115,18 @@ class Particle{
         this.vy += (dym/d) * f;
         this.color = `rgba(${randInt(0,255)},${randInt(0,255)},${randInt(0,255)},0.95)`;
         this.isDisrupted = true;
-        this.cooldown = (Math.floor(Math.random()*11)+5) * 60;
+        this.cooldown = randInt(60, 300);
       }
     }
 
     this.vx += (Math.random()-0.5) * 0.01;
     this.vy += (Math.random()-0.5) * 0.01;
-
     this.vx *= 0.9; this.vy *= 0.9;
     this.x += this.vx; this.y += this.vy;
 
     if(!this.target){ this.color = this.baseColor; }
     else if(this.target.color && !this.isDisrupted && this.cooldown <= 0 && this.reassignDelay <= 0){
-      this.color = this.target.color; // instant snap
+      this.color = this.target.color;
     }
     if(this.isDisrupted){ this.color = this.target && this.target.color ? this.target.color : this.baseColor; this.isDisrupted = false; }
 
@@ -120,34 +154,6 @@ function initParticles(count = desiredParticles){
   }
 }
 
-function resize(){
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-  initParticles(desiredParticles);
-  rasterizeText(textInput.value || '');
-  assignRasterTargets(true);
-}
-window.addEventListener('resize', debounce(resize, 120));
-
-// UI refs
-const textInput = document.getElementById('textInput');
-const densitySelect = document.getElementById('densitySelect');
-
-// --- initial setup ---
-initParticles();
-resize();
-
-textInput.addEventListener('input', e => {
-  rasterizeText(e.target.value || '');
-  assignRasterTargets(false);
-});
-
-densitySelect.addEventListener('change', e => {
-  densityMultiplier = parseFloat(e.target.value) || 1;
-  rasterizeText(textInput.value || '');
-  assignRasterTargets(false);
-});
-
 function rasterizeText(text){
   const offCanvas = document.createElement('canvas');
   offCanvas.width = canvas.width; offCanvas.height = canvas.height;
@@ -171,13 +177,29 @@ function rasterizeText(text){
   return rasterPoints;
 }
 
+function rasterizeImage(img){
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = canvas.width; offCanvas.height = canvas.height;
+  const offCtx = offCanvas.getContext('2d');
+  const ratio = Math.min(offCanvas.width / img.width, offCanvas.height / img.height);
+  const iw = Math.max(1, Math.floor(img.width * ratio));
+  const ih = Math.max(1, Math.floor(img.height * ratio));
+  const ix = Math.floor((offCanvas.width - iw) / 2);
+  const iy = Math.floor((offCanvas.height - ih) / 2);
+  offCtx.fillStyle = '#000'; offCtx.fillRect(0,0,offCanvas.width,offCanvas.height);
+  offCtx.drawImage(img, ix, iy, iw, ih);
+  rasterPoints = extractPoints(offCtx, offCanvas);
+  if(!rasterPoints || rasterPoints.length === 0){ showMessage('No visible pixels found in image — try a different image or increase particle count'); }
+  return rasterPoints;
+}
+
 function extractPoints(offCtx, offCanvas){
   const imgData = offCtx.getImageData(0,0,offCanvas.width,offCanvas.height).data;
   const points = [];
   const baseStep = Math.sqrt((canvas.width*canvas.height)/(desiredParticles*1.5));
   const step = Math.max(1, Math.floor(baseStep / densityMultiplier));
-  for(let x = 0; x < offCanvas.width; x += step){
-    for(let y = 0; y < offCanvas.height; y += step){
+  for(let y = 0; y < offCanvas.height; y += step){
+    for(let x = 0; x < offCanvas.width; x += step){
       const idx = (Math.floor(y) * offCanvas.width + Math.floor(x)) * 4;
       const r = imgData[idx], g = imgData[idx+1], b = imgData[idx+2];
       if(r+g+b > 60){ points.push({x,y,color:`rgba(${r},${g},${b},0.95)`}); }
@@ -189,17 +211,169 @@ function extractPoints(offCtx, offCanvas){
 function assignRasterTargets(initial){
   if(!rasterPoints) return;
   if(rasterPoints.length > particles.length){ initParticles(rasterPoints.length); }
-  const shuffled = rasterPoints.slice().sort(()=>Math.random()-0.5);
+
   for(let i=0;i<particles.length;i++){
-    if(i < shuffled.length){
-      particles[i].target = shuffled[i];
-      if(shuffled[i].color) particles[i].color = shuffled[i].color;
-      particles[i].reassignDelay = initial ? 0 : Math.floor(Math.random()*150);
+    if(i < rasterPoints.length){
+      particles[i].target = rasterPoints[i];
+      if(rasterPoints[i].color) particles[i].color = rasterPoints[i].color;
+      particles[i].reassignDelay = initial ? 0 : randInt(60, 300);
     } else { particles[i].target = null; }
   }
 }
 
+function resize(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  initParticles(desiredParticles);
+  if(mode === 'text'){
+    rasterizeText(textInput.value || '');
+    assignRasterTargets(true);
+  } else if(mode === 'image' && uploadedImage){
+    try{ rasterizeImage(uploadedImage); assignRasterTargets(true); }
+    catch(err){ console.error('resize rasterizeImage error', err); }
+  }
+}
+window.addEventListener('resize', debounce(resize, 120));
+
+// --- UI wiring ---
+textInput.addEventListener('input', e => {
+  if(mode === 'text'){
+    rasterizeText(e.target.value || '');
+    assignRasterTargets(false);
+  }
+});
+
+densitySelect.addEventListener('change', e => {
+  densityMultiplier = parseFloat(e.target.value) || 1;
+  if(mode === 'text'){
+    rasterizeText(textInput.value || '');
+    assignRasterTargets(false);
+  } else if(mode === 'image' && uploadedImage){
+    rasterizeImage(uploadedImage);
+    assignRasterTargets(false);
+  }
+});
+
+particleAmountSelect.addEventListener('change', e => {
+  desiredParticles = parseInt(e.target.value) || baseParticleCount;
+  initParticles(desiredParticles);
+  if(mode === 'text'){
+    rasterizeText(textInput.value || '');
+    assignRasterTargets(true);
+  } else if(mode === 'image' && uploadedImage){
+    rasterizeImage(uploadedImage);
+    assignRasterTargets(true);
+  }
+});
+
+toggleMode.addEventListener('change', e => {
+  mode = e.target.value;
+  if(mode === 'image'){
+    textInput.style.display = 'none';
+    imageUpload.style.display = 'inline-block';
+    formImageBtn.style.display = 'inline-block';
+    formImageBtn.disabled = !uploadedImage;
+  } else {
+    textInput.style.display = 'inline-block';
+    imageUpload.style.display = 'none';
+    formImageBtn.style.display = 'none';
+    formImageBtn.disabled = true;
+    if(mode === 'text'){
+      if(textInput.value) rasterizeText(textInput.value);
+      else rasterPoints = null;
+      assignRasterTargets(true);
+    }
+  }
+});
+
+function isImageFile(file){
+  if(!file) return false;
+  if(file.type && file.type.startsWith('image/')) return true;
+  const name = (file.name || '').toLowerCase();
+  return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name);
+}
+
+imageUpload.addEventListener('change', e => {
+  const file = e.target.files && e.target.files[0];
+  if(!file){ uploadedImage = null; formImageBtn.disabled = true; showMessage('No file selected'); return; }
+  if(!isImageFile(file)){
+    uploadedImage = null; formImageBtn.disabled = true; showMessage('Selected file is not a supported image type'); return;
+  }
+
+  formImageBtn.disabled = true;
+  showMessage('Loading image...');
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataURL = reader.result;
+    const img = new Image();
+    img.onload = () => {
+      uploadedImage = img;
+      formImageBtn.disabled = false;
+      showMessage('Image ready — press "Form Image"');
+    };
+    img.onerror = () => {
+      uploadedImage = null; formImageBtn.disabled = true; showMessage('Failed to load image (file may be corrupted or unsupported)');
+    };
+    img.src = dataURL;
+  };
+  reader.onerror = () => { uploadedImage = null; formImageBtn.disabled = true; showMessage('Error reading file'); };
+  try{ reader.readAsDataURL(file); } catch(err){ uploadedImage = null; formImageBtn.disabled = true; showMessage('Error reading file'); }
+});
+
+formImageBtn.addEventListener('click', async () => {
+  if(!uploadedImage){
+    const file = imageUpload.files && imageUpload.files[0];
+    if(!file){ showMessage('No image to form'); return; }
+    if(!isImageFile(file)){ showMessage('Not a supported image'); return; }
+    formImageBtn.disabled = true;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        uploadedImage = img;
+        formImageBtn.disabled = false;
+        try{ rasterizeImage(uploadedImage); assignRasterTargets(true); textInput.value = ''; showMessage('Image formed'); }
+        catch(err){ console.error(err); showMessage('Failed to form image'); }
+      };
+      img.onerror = () => { formImageBtn.disabled = false; showMessage('Failed to load image'); };
+      img.src = reader.result;
+    };
+    reader.onerror = () => { formImageBtn.disabled = false; showMessage('Failed to read file'); };
+    try{ reader.readAsDataURL(file); } catch(err){ formImageBtn.disabled = false; showMessage('Failed to read file'); }
+    return;
+  }
+
+  try{
+    rasterizeImage(uploadedImage);
+    assignRasterTargets(true);
+    textInput.value = '';
+    showMessage('Image formed');
+  } catch(err){
+    console.error('rasterizeImage error', err);
+    showMessage('Failed to form image (see console)');
+  }
+});
+
 function animate(){
+  const now = performance.now();
+  const delta = now - lastFrameTime;
+  lastFrameTime = now;
+  const fps = 1000 / delta;
+  fpsHistory.push(fps);
+  if(fpsHistory.length > 60) fpsHistory.shift();
+  const avgFps = fpsHistory.reduce((a,b)=>a+b,0)/fpsHistory.length;
+
+  if(avgFps < 5){
+    console.warn("Low FPS detected, resetting canvas to save memory");
+    // reset to a safe state but keep animating
+    desiredParticles = baseParticleCount;
+    initParticles(desiredParticles);
+    rasterPoints = null;
+    showMessage('Low FPS — canvas reset to save memory');
+    fpsHistory = [];
+  }
+
   ctx.fillStyle = 'rgba(11,12,16,0.35)';
   ctx.fillRect(0,0,canvas.width,canvas.height);
   for(const p of particles) p.update();
@@ -209,6 +383,10 @@ function animate(){
 canvas.addEventListener('mousemove', e=>{ mouse.x = e.clientX; mouse.y = e.clientY; });
 canvas.addEventListener('mouseleave', ()=>{ mouse.x = null; mouse.y = null; });
 
+// start
+initParticles();
+if(textInput.value) rasterizeText(textInput.value);
+assignRasterTargets(true);
 animate();
 
 function debounce(fn, t){ let id = null; return (...a)=>{ clearTimeout(id); id = setTimeout(()=>fn(...a), t); }; }
