@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Particle Text / Cam</title>
+  <style>
+    html,body{height:100%;margin:0;background:#0b0c10;overflow:hidden;color:#fff;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto}
+    canvas{display:block;position:fixed;top:0;left:0;width:100%;height:100%;z-index:0}
+    #controls{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);z-index:2;display:flex;gap:10px;align-items:center}
+    #textInput{padding:8px 12px;border-radius:6px;border:none;font-size:16px;width:300px;}
+    #densitySelect{padding:6px 10px;border-radius:6px;border:none;font-size:14px;}
+    label{display:flex;align-items:center;gap:5px;font-size:14px;}
+
+    /* message overlay */
+    #msg{position:fixed;top:20px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.6);color:#fff;padding:10px 14px;border-radius:8px;z-index:3;display:none;font-size:14px}
+  </style>
+</head>
+<body>
+<div id="controls">
+  <input id="textInput" type="text" value="HELLO 🌎✨" autocomplete="off" />
+  <select id="densitySelect">
+    <option value="1">Low</option>
+    <option value="1.5">Medium</option>
+    <option value="2">High</option>
+  </select>
+  <label><input type="checkbox" id="camToggle" /> ParticleCam</label>
+</div>
+<div id="msg" role="status" aria-live="polite"></div>
+<canvas id="canvas"></canvas>
+<script>
+// Robust Particle Text + ParticleCam
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const msgEl = document.getElementById('msg');
+let particles = [];
+let mouse = {x: null, y: null};
+let rasterPoints = null;
+let particleSize = 0.6;
+let charsPerLine = 16;
+let desiredParticles = 8000;
+let densityMultiplier = 1;
+
+function showMessage(text, ms = 3000){
+  msgEl.textContent = text;
+  msgEl.style.display = 'block';
+  clearTimeout(showMessage._t);
+  showMessage._t = setTimeout(()=>{ msgEl.style.display = 'none'; }, ms);
+}
+
+function randomColor(){
+  return `rgba(${Math.floor(Math.random()*255)},${Math.floor(Math.random()*255)},${Math.floor(Math.random()*255)},0.6)`;
+}
+
+class Particle{
+  constructor(x,y){
+    this.x = x; this.y = y; this.ox = x; this.oy = y;
+    this.vx = 0; this.vy = 0;
+    this.size = particleSize;
+    this.baseColor = randomColor();
+    this.color = this.baseColor;
+    this.target = null;
+    this.isDisrupted = false;
+    this.moveDuration = 5;
+    this.cooldown = 0;
+    this.reassignDelay = 0;
+  }
+  update(){
+    let tx = this.ox, ty = this.oy;
+    if(this.target){ tx = this.target.x; ty = this.target.y; }
+
+    if(this.cooldown <= 0 && this.reassignDelay <= 0){
+      const dx = tx - this.x;
+      const dy = ty - this.y;
+      const ease = 0.025 / this.moveDuration;
+      this.vx += dx * ease;
+      this.vy += dy * ease;
+    } else {
+      if(this.cooldown > 0) this.cooldown--;
+      if(this.reassignDelay > 0) this.reassignDelay--;
+    }
+
+    // mouse disruption
+    if(mouse.x !== null){
+      const dxm = this.x - mouse.x;
+      const dym = this.y - mouse.y;
+      const d2 = dxm*dxm + dym*dym;
+      const R = 100;
+      if(d2 < R*R){
+        const d = Math.sqrt(d2) + 0.0001;
+        const f = (1 - (d / R)) * 4.0;
+        this.vx += (dxm/d) * f;
+        this.vy += (dym/d) * f;
+        this.color = `rgba(${Math.floor(Math.random()*255)},${Math.floor(Math.random()*255)},${Math.floor(Math.random()*255)},0.95)`;
+        this.isDisrupted = true;
+        this.cooldown = (Math.floor(Math.random()*11)+5) * 60;
+      }
+    }
+
+    this.vx += (Math.random()-0.5) * 0.01;
+    this.vy += (Math.random()-0.5) * 0.01;
+
+    this.vx *= 0.9; this.vy *= 0.9;
+    this.x += this.vx; this.y += this.vy;
+
+    if(!this.target){ this.color = this.baseColor; }
+    else if(this.target.color && !this.isDisrupted && this.cooldown <= 0 && this.reassignDelay <= 0){
+      this.color = this.target.color; // instant snap
+    }
+    if(this.isDisrupted){ this.color = this.target && this.target.color ? this.target.color : this.baseColor; this.isDisrupted = false; }
+
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size, 0, Math.PI*2);
+    ctx.fillStyle = this.color;
+    ctx.fill();
+  }
+}
+
+function initParticles(count = desiredParticles){
+  desiredParticles = Math.max(0, Math.floor(count));
+  particles = [];
+  const cols = Math.max(1, Math.floor(Math.sqrt(desiredParticles * (canvas.width/canvas.height))));
+  const rows = Math.max(1, Math.floor(desiredParticles / cols));
+  const xStep = canvas.width / cols;
+  const yStep = canvas.height / rows;
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      const x = c * xStep + xStep/2;
+      const y = r * yStep + yStep/2;
+      particles.push(new Particle(x,y));
+      if(particles.length >= desiredParticles) return;
+    }
+  }
+}
+
+function resize(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  // re-init based on current desiredParticles
+  initParticles(desiredParticles);
+  rasterizeText(textInput.value || '');
+  assignRasterTargets(true);
+}
+window.addEventListener('resize', debounce(resize, 120));
+
+// UI refs
+const textInput = document.getElementById('textInput');
+const densitySelect = document.getElementById('densitySelect');
+const camToggle = document.getElementById('camToggle');
+
+// Camera vars
+let camStream = null;
+let camVideo = null;
+let camInterval = null;
+
+// --- initial setup ---
+initParticles();
+resize();
+
+textInput.addEventListener('input', e => {
+  stopCameraIfRunning();
+  rasterizeText(e.target.value || '');
+  assignRasterTargets(false);
+});
+
+densitySelect.addEventListener('change', e => {
+  densityMultiplier = parseFloat(e.target.value) || 1;
+  // re-rasterize current content and reassign targets
+  rasterizeText(textInput.value || '');
+  assignRasterTargets(false);
+});
+
+camToggle.addEventListener('change', async e => {
+  if(e.target.checked){
+    const ok = await startCameraSafely();
+    if(!ok){
+      e.target.checked = false;
+      return;
+    }
+    // take an immediate snapshot if possible
+    rasterizeVideoFrame();
+    assignRasterTargets(false);
+    // then update every 10s
+    camInterval = setInterval(()=>{
+      rasterizeVideoFrame();
+      assignRasterTargets(false);
+    }, 10000);
+  } else {
+    stopCameraIfRunning();
+    rasterizeText(textInput.value || '');
+    assignRasterTargets(false);
+  }
+});
+
+async function startCameraSafely(){
+  // quick capability checks
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    showMessage('Camera API not available in this browser.');
+    return false;
+  }
+  if(location.protocol !== 'https:' && location.hostname !== 'localhost'){
+    // many browsers require secure context
+    showMessage('Camera requires HTTPS (or localhost).');
+    return false;
+  }
+
+  try{
+    camStream = await navigator.mediaDevices.getUserMedia({ video: true });
+  }catch(err){
+    console.error('Camera error', err);
+    showMessage('Camera not available or permission denied.');
+    camStream = null;
+    return false;
+  }
+
+  try{
+    camVideo = document.createElement('video');
+    camVideo.autoplay = false;
+    camVideo.muted = true;
+    camVideo.playsInline = true;
+    camVideo.srcObject = camStream;
+    // wait for some data before trying to draw
+    await new Promise((res, rej)=>{
+      const onLoaded = ()=>{ cleanup(); res(); };
+      const onErr = (e)=>{ cleanup(); rej(e); };
+      function cleanup(){ camVideo.removeEventListener('loadeddata', onLoaded); camVideo.removeEventListener('error', onErr); }
+      camVideo.addEventListener('loadeddata', onLoaded);
+      camVideo.addEventListener('error', onErr);
+      // some browsers require play() to kick in the stream
+      const p = camVideo.play();
+      if(p && p.catch){ p.catch(()=>{}); }
+      // fallback: if loadeddata doesn't fire within 2.5s, resolve anyway
+      setTimeout(()=>{ cleanup(); res(); }, 2500);
+    });
+  }catch(err){
+    console.error('Video setup error', err);
+    showMessage('Could not start video stream.');
+    stopCameraIfRunning();
+    return false;
+  }
+
+  showMessage('ParticleCam active', 1500);
+  return true;
+}
+
+function stopCameraIfRunning(){
+  if(camInterval){ clearInterval(camInterval); camInterval = null; }
+  if(camStream){
+    try{ camStream.getTracks().forEach(t=>t.stop()); }catch(_){ }
+  }
+  camStream = null;
+  camVideo = null;
+}
+
+function rasterizeText(text){
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = canvas.width; offCanvas.height = canvas.height;
+  const offCtx = offCanvas.getContext('2d');
+  offCtx.fillStyle = '#000'; offCtx.fillRect(0,0,offCanvas.width,offCanvas.height);
+
+  const estimatedCharRatio = 0.6;
+  let fontSize = Math.floor(canvas.width / (charsPerLine * estimatedCharRatio));
+  fontSize = Math.max(20, Math.min(fontSize, Math.floor(canvas.height/2)));
+
+  offCtx.fillStyle = '#fff';
+  offCtx.font = `bold ${fontSize}px sans-serif`;
+  offCtx.textBaseline = 'top'; offCtx.textAlign = 'left';
+
+  const lines = [];
+  for(let i=0;i<text.length;i+=charsPerLine){ lines.push(text.slice(i,i+charsPerLine)); }
+  const startX = 20; const startY = 20;
+  lines.forEach((ln, idx)=> offCtx.fillText(ln, startX, startY + idx * Math.floor(fontSize * 1.05)));
+
+  rasterPoints = extractPoints(offCtx, offCanvas);
+  return rasterPoints;
+}
+
+function rasterizeVideoFrame(){
+  if(!camVideo){ return null; }
+  // only draw if video has data
+  if(typeof camVideo.readyState !== 'undefined' && camVideo.readyState < 2){ return null; }
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = canvas.width; offCanvas.height = canvas.height;
+  const offCtx = offCanvas.getContext('2d');
+  try{
+    offCtx.drawImage(camVideo, 0, 0, offCanvas.width, offCanvas.height);
+  }catch(err){
+    // drawImage may throw in restrictive contexts — handle gracefully
+    console.error('drawImage error', err);
+    showMessage('Unable to capture camera frame.');
+    return null;
+  }
+  rasterPoints = extractPoints(offCtx, offCanvas);
+  return rasterPoints;
+}
+
+function extractPoints(offCtx, offCanvas){
+  const imgData = offCtx.getImageData(0,0,offCanvas.width,offCanvas.height).data;
+  const points = [];
+  const baseStep = Math.sqrt((canvas.width*canvas.height)/(desiredParticles*1.5));
+  const step = Math.max(1, Math.floor(baseStep / densityMultiplier));
+  for(let x = 0; x < offCanvas.width; x += step){
+    for(let y = 0; y < offCanvas.height; y += step){
+      const idx = (Math.floor(y) * offCanvas.width + Math.floor(x)) * 4;
+      const r = imgData[idx], g = imgData[idx+1], b = imgData[idx+2];
+      if(r+g+b > 60){ points.push({x,y,color:`rgba(${r},${g},${b},0.95)`}); }
+    }
+  }
+  return points;
+}
+
+function assignRasterTargets(initial){
+  if(!rasterPoints) return;
+  // If rasterPoints require more particles than we have, re-init to match (but cap to avoid OOM)
+  if(rasterPoints.length > particles.length){
+    const cap = Math.max(rasterPoints.length, desiredParticles);
+    initParticles(cap);
+  }
+  for(let i=0;i<particles.length;i++){
+    if(i < rasterPoints.length){
+      particles[i].target = rasterPoints[i];
+      if(rasterPoints[i].color) particles[i].color = rasterPoints[i].color;
+      particles[i].reassignDelay = initial ? 0 : Math.floor(Math.random()*150);
+    } else {
+      particles[i].target = null;
+    }
+  }
+}
+
+function animate(){
+  ctx.fillStyle = 'rgba(11,12,16,0.35)';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  for(const p of particles) p.update();
+  requestAnimationFrame(animate);
+}
+
+canvas.addEventListener('mousemove', e=>{ mouse.x = e.clientX; mouse.y = e.clientY; });
+canvas.addEventListener('mouseleave', ()=>{ mouse.x = null; mouse.y = null; });
+
+animate();
+
+function debounce(fn, t){ let id = null; return (...a)=>{ clearTimeout(id); id = setTimeout(()=>fn(...a), t); }; }
+</script>
+</body>
+</html>
